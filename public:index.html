@@ -1,0 +1,236 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<title>Collab Whiteboard</title>
+<style>
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    background: #f4f5f7;
+    overflow: hidden;
+  }
+  #toolbar {
+    position: fixed;
+    top: 12px;
+    left: 50%;
+    transform: translateX(-50%);
+    z-index: 10;
+    background: #fff;
+    border-radius: 12px;
+    box-shadow: 0 4px 16px rgba(0,0,0,0.12);
+    padding: 8px 14px;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+  }
+  #toolbar button, #toolbar input[type=color], #toolbar select {
+    border: none;
+    background: #f0f1f3;
+    border-radius: 8px;
+    padding: 6px 10px;
+    cursor: pointer;
+    font-size: 14px;
+  }
+  #toolbar button.active { background: #4f7cff; color: white; }
+  #toolbar input[type=range] { width: 70px; }
+  #status {
+    position: fixed;
+    top: 12px;
+    right: 12px;
+    z-index: 10;
+    background: #fff;
+    border-radius: 10px;
+    padding: 8px 14px;
+    box-shadow: 0 4px 16px rgba(0,0,0,0.12);
+    font-size: 13px;
+    color: #333;
+  }
+  #room-label {
+    position: fixed;
+    top: 12px;
+    left: 12px;
+    z-index: 10;
+    background: #fff;
+    border-radius: 10px;
+    padding: 8px 14px;
+    box-shadow: 0 4px 16px rgba(0,0,0,0.12);
+    font-size: 13px;
+    color: #333;
+  }
+  canvas {
+    display: block;
+    background: white;
+    cursor: crosshair;
+  }
+  .remote-cursor {
+    position: fixed;
+    width: 10px;
+    height: 10px;
+    border-radius: 50%;
+    background: #ff4f81;
+    pointer-events: none;
+    z-index: 9;
+    transform: translate(-50%, -50%);
+    transition: left 0.05s linear, top 0.05s linear;
+  }
+</style>
+</head>
+<body>
+
+<div id="room-label">Room: <b id="room-name"></b></div>
+<div id="status">Users online: <b id="user-count">1</b></div>
+
+<div id="toolbar">
+  <button id="tool-pen" class="active">✏️ Pen</button>
+  <button id="tool-eraser">🧹 Eraser</button>
+  <input type="color" id="color-picker" value="#1a1a1a" />
+  <input type="range" id="size-picker" min="1" max="30" value="4" />
+  <button id="clear-btn">🗑️ Clear</button>
+</div>
+
+<canvas id="board"></canvas>
+
+<script src="/socket.io/socket.io.js"></script>
+<script>
+  const canvas = document.getElementById("board");
+  const ctx = canvas.getContext("2d");
+
+  function resize() {
+    canvas.width = window.innerWidth;
+    canvas.height = window.innerHeight;
+  }
+  resize();
+  window.addEventListener("resize", resize);
+
+  // Room handling via URL hash, e.g. #room=team1
+  let roomId = new URLSearchParams(window.location.search).get("room");
+  if (!roomId) {
+    roomId = Math.random().toString(36).substring(2, 8);
+    const url = new URL(window.location);
+    url.searchParams.set("room", roomId);
+    window.history.replaceState({}, "", url);
+  }
+  document.getElementById("room-name").textContent = roomId;
+
+  const socket = io();
+  socket.emit("join-room", roomId);
+
+  let drawing = false;
+  let tool = "pen";
+  let color = "#1a1a1a";
+  let size = 4;
+  let lastX, lastY;
+
+  document.getElementById("tool-pen").onclick = () => setTool("pen");
+  document.getElementById("tool-eraser").onclick = () => setTool("eraser");
+  function setTool(t) {
+    tool = t;
+    document.getElementById("tool-pen").classList.toggle("active", t === "pen");
+    document.getElementById("tool-eraser").classList.toggle("active", t === "eraser");
+  }
+
+  document.getElementById("color-picker").oninput = (e) => color = e.target.value;
+  document.getElementById("size-picker").oninput = (e) => size = parseInt(e.target.value);
+
+  document.getElementById("clear-btn").onclick = () => {
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    socket.emit("clear");
+  };
+
+  function getPos(e) {
+    const rect = canvas.getBoundingClientRect();
+    const clientX = e.touches ? e.touches[0].clientX : e.clientX;
+    const clientY = e.touches ? e.touches[0].clientY : e.clientY;
+    return { x: clientX - rect.left, y: clientY - rect.top };
+  }
+
+  function drawLine(x0, y0, x1, y1, strokeColor, strokeSize, isEraser) {
+    ctx.beginPath();
+    ctx.moveTo(x0, y0);
+    ctx.lineTo(x1, y1);
+    ctx.strokeStyle = isEraser ? "#ffffff" : strokeColor;
+    ctx.lineWidth = strokeSize;
+    ctx.lineCap = "round";
+    ctx.lineJoin = "round";
+    ctx.stroke();
+  }
+
+  function startDraw(e) {
+    drawing = true;
+    const pos = getPos(e);
+    lastX = pos.x;
+    lastY = pos.y;
+  }
+
+  function moveDraw(e) {
+    const pos = getPos(e);
+    socket.emit("cursor-move", pos);
+    if (!drawing) return;
+    const isEraser = tool === "eraser";
+    drawLine(lastX, lastY, pos.x, pos.y, color, size, isEraser);
+    socket.emit("draw", {
+      x0: lastX, y0: lastY, x1: pos.x, y1: pos.y,
+      color, size, isEraser
+    });
+    lastX = pos.x;
+    lastY = pos.y;
+  }
+
+  function endDraw() {
+    drawing = false;
+  }
+
+  canvas.addEventListener("mousedown", startDraw);
+  canvas.addEventListener("mousemove", moveDraw);
+  canvas.addEventListener("mouseup", endDraw);
+  canvas.addEventListener("mouseleave", endDraw);
+
+  canvas.addEventListener("touchstart", (e) => { startDraw(e); e.preventDefault(); }, { passive: false });
+  canvas.addEventListener("touchmove", (e) => { moveDraw(e); e.preventDefault(); }, { passive: false });
+  canvas.addEventListener("touchend", endDraw);
+
+  // ---- Socket events from server ----
+  socket.on("draw", (data) => {
+    drawLine(data.x0, data.y0, data.x1, data.y1, data.color, data.size, data.isEraser);
+  });
+
+  socket.on("clear", () => {
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+  });
+
+  socket.on("load-history", (history) => {
+    history.forEach(data => {
+      drawLine(data.x0, data.y0, data.x1, data.y1, data.color, data.size, data.isEraser);
+    });
+  });
+
+  socket.on("user-count", (count) => {
+    document.getElementById("user-count").textContent = count;
+  });
+
+  // ---- Remote cursors ----
+  const cursors = {};
+  socket.on("cursor-move", (data) => {
+    let el = cursors[data.id];
+    if (!el) {
+      el = document.createElement("div");
+      el.className = "remote-cursor";
+      document.body.appendChild(el);
+      cursors[data.id] = el;
+    }
+    const rect = canvas.getBoundingClientRect();
+    el.style.left = (rect.left + data.x) + "px";
+    el.style.top = (rect.top + data.y) + "px";
+  });
+
+  socket.on("cursor-remove", (id) => {
+    if (cursors[id]) {
+      cursors[id].remove();
+      delete cursors[id];
+    }
+  });
+</script>
+</body>
+</html>
